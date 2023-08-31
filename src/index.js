@@ -31,6 +31,13 @@ if (!objects) {
 		let m = String(url).match(/^blob:http:\/\/localhost\/(.+)$/);
 		if (m) delete objects[m[1]];
 	};
+
+	const OrigBlob = Blob;
+	self.Blob = function(arr, opts) {
+			const blob = new OrigBlob(arr, opts);
+			blob._arr = arr;
+			return blob;
+	};
 }
 
 if (!self.fetch || !('jsdomWorker' in self.fetch)) {
@@ -38,6 +45,11 @@ if (!self.fetch || !('jsdomWorker' in self.fetch)) {
 	self.fetch = function (url, opts) {
 		let _url = typeof url === 'object' ? url.url || url.href : url;
 		if (_url.match(/^blob:/)) {
+			const id = _url.match(/[^/]+$/)[0];
+			const blob = objects[id];
+			if (blob._arr) {
+				return blob._arr[0];
+			}
 			return new Promise((resolve, reject) => {
 				let fr = new FileReader();
 				fr.onload = () => {
@@ -47,8 +59,7 @@ if (!self.fetch || !('jsdomWorker' in self.fetch)) {
 				fr.onerror = () => {
 					reject(fr.error);
 				};
-				let id = _url.match(/[^/]+$/)[0];
-				fr.readAsText(objects[id]);
+				fr.readAsText(blob);
 			});
 		}
 		return oldFetch.call(this, url, opts);
@@ -120,24 +131,31 @@ function Worker(url, options) {
 		terminated = true;
 		messageQueue = null;
 	};
-	self
-		.fetch(url)
-		.then(r => r.text())
-		.then(code => {
-			let vars = 'var self=this,global=self';
-			for (let k in scope) vars += `,${k}=self.${k}`;
-			getScopeVar = Function(
-				vars +
-					';\n' +
-					code +
-					'\nreturn function(n){return n=="onmessage"?onmessage:null;}'
-			).call(scope);
-			let q = messageQueue;
-			messageQueue = null;
-			if (q) q.forEach(this.postMessage);
-		})
-		.catch(e => {
-			outside.emit('error', e);
-			console.error(e);
-		});
+	const runCode = (code) => {
+		let vars = 'var self=this,global=self';
+		for (let k in scope) vars += `,${k}=self.${k}`;
+		getScopeVar = Function(
+			vars +
+				';\n' +
+				code +
+				'\nreturn function(n){return n=="onmessage"?onmessage:null;}'
+		).call(scope);
+		let q = messageQueue;
+		messageQueue = null;
+		if (q) q.forEach(this.postMessage);
+	};
+	const fetchRes = self.fetch(url);
+	if (typeof fetchRes === 'string') {
+		runCode(fetchRes);
+	} else {
+		fetchRes
+			.then(r => r.text())
+			.then(code => {
+				runCode(code);
+			})
+			.catch(e => {
+				outside.emit('error', e);
+				console.error(e);
+			});
+	}
 }
